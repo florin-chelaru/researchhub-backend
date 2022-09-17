@@ -1,5 +1,6 @@
 import cloudscraper
 import requests
+from rest_framework.response import Response as DRF_Response
 
 # TODO: Use contstants instead of class
 GET = "GET"
@@ -88,3 +89,9 @@ def check_url_contains_pdf(url) -> bool:
         return "application/pdf" in content_type
     except Exception:
         return False
+
+
+class Response(DRF_Response):
+    def __init__(self, *args, unified_document=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unified_document = unified_document

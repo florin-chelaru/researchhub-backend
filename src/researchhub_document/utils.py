@@ -1,3 +1,4 @@
+import functools
 from datetime import datetime, timedelta
 
 from django.db.models.query import QuerySet
@@ -116,6 +117,21 @@ def reset_unified_document_cache(
                         priority=priority,
                         countdown=1,
                     )
+
+
+def update_filters(filters=[]):
+    def decorate(func):
+        @functools.wraps(func)
+        def inner(*args, **kwargs):
+            res = func(*args, **kwargs)
+            unified_document = getattr(res, "unified_document", None)
+            if unified_document:
+                unified_document.update_filters(filters)
+            return res
+
+        return inner
+
+    return decorate
 
 
 def update_unified_document_to_paper(paper):

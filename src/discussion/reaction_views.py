@@ -3,7 +3,6 @@ from django.db import IntegrityError, transaction
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
 
 from analytics.amplitude import track_event
 from discussion.models import Comment, Reply, Thread
@@ -25,9 +24,16 @@ from researchhub_document.related_models.constants.filters import (
     HOT,
     UPVOTED,
 )
-from researchhub_document.utils import get_doc_type_key, reset_unified_document_cache
+from researchhub_document.utils import (
+    get_doc_type_key,
+    reset_unified_document_cache,
+    update_filters,
+)
+from utils.http import Response
 from utils.permissions import CreateOrUpdateIfAllowed
 from utils.siftscience import decisions_api, events_api, update_user_risk_score
+
+# from rest_framework.response import Response
 
 
 class ReactionViewActionMixin:
@@ -168,6 +174,7 @@ class ReactionViewActionMixin:
             return Response(self.get_serializer(instance=item).data, status=200)
 
     @track_event
+    @update_filters(filters=[SORT_UPVOTED])
     @action(
         detail=True,
         methods=["post"],
@@ -182,7 +189,6 @@ class ReactionViewActionMixin:
                 "This vote already exists", status=status.HTTP_400_BAD_REQUEST
             )
         response = update_or_create_vote(request, user, item, Vote.UPVOTE)
-        item.unified_document.update_filter(SORT_UPVOTED)
         return response
 
     @action(
@@ -203,6 +209,7 @@ class ReactionViewActionMixin:
         return response
 
     @track_event
+    @update_filters(filters=SORT_UPVOTED)
     @action(
         detail=True,
         methods=["post"],
@@ -219,7 +226,6 @@ class ReactionViewActionMixin:
                 "This vote already exists", status=status.HTTP_400_BAD_REQUEST
             )
         response = update_or_create_vote(request, user, item, Vote.DOWNVOTE)
-        item.unified_document.update_filter(SORT_UPVOTED)
         return response
 
     @action(detail=True, methods=["get"])
@@ -339,7 +345,9 @@ def retrieve_vote(user, item):
 
 def get_vote_response(vote, status_code):
     serializer = VoteSerializer(vote)
-    return Response(serializer.data, status=status_code)
+    return Response(
+        serializer.data, status=status_code, unified_document=vote.unified_document
+    )
 
 
 def create_vote(user, item, vote_type):
