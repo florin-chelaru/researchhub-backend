@@ -23,7 +23,6 @@ from rest_framework.permissions import (
     IsAuthenticated,
     IsAuthenticatedOrReadOnly,
 )
-from rest_framework.response import Response
 
 from analytics.amplitude import track_event
 from discussion.models import Vote as GrmVote
@@ -68,7 +67,7 @@ from researchhub_document.related_models.constants.filters import (
     UPVOTED,
 )
 from researchhub_document.utils import reset_unified_document_cache
-from utils.http import GET, POST, check_url_contains_pdf
+from utils.http import GET, POST, Response, check_url_contains_pdf
 from utils.permissions import CreateOnly, CreateOrUpdateIfAllowed, HasAPIKey
 from utils.sentry import log_error
 from utils.siftscience import decisions_api, events_api
