@@ -326,6 +326,8 @@ router.register(r"rh_comments", RhCommentViewSet, basename="rh_comments")
 router.register(
     r"rh_comment_threads", RhCommentThreadViewSet, basename="rh_comment_threads"
 )
+router.register(r"popover/user", user.views.UserPopoverViewSet, basename="popover_user")
+
 urlpatterns = [
     path("admin/", admin.site.urls),
     re_path(r"^api/", include(router.urls)),
