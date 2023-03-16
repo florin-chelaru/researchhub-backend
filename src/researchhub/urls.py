@@ -322,10 +322,16 @@ router.register(
 router.register(
     r"researchhub_unified_document/([0-9]+)/review", ReviewViewSet, basename="review"
 )
-router.register(r"rh_comments", RhCommentViewSet, basename="rh_comments")
 
 router.register(
     r"exchange_rate", purchase.views.RscExchangeRateViewSet, basename="exchange_rate"
+)
+
+router.register(
+    r"(?P<model>\w+)/(?P<model_object_id>[0-9]+)/comments",
+    RhCommentViewSet,
+    basename="rh_comments",
+
 )
 
 urlpatterns = [
