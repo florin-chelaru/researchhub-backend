@@ -323,12 +323,11 @@ router.register(
     r"researchhub_unified_document/([0-9]+)/review", ReviewViewSet, basename="review"
 )
 router.register(r"rh_comments", RhCommentViewSet, basename="rh_comments")
-router.register(
-    r"rh_comment_threads", RhCommentThreadViewSet, basename="rh_comment_threads"
-)
+
 router.register(
     r"exchange_rate", purchase.views.RscExchangeRateViewSet, basename="exchange_rate"
 )
+
 urlpatterns = [
     path("admin/", admin.site.urls),
     re_path(r"^api/", include(router.urls)),
