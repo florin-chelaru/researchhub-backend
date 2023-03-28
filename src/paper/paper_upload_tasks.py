@@ -19,6 +19,7 @@ from django.db.models import Q
 from habanero import Crossref
 from requests.exceptions import HTTPError
 
+from discussion.models import Thread
 from paper.exceptions import (
     DOINotFoundError,
     DuplicatePaperError,
@@ -653,6 +654,22 @@ def celery_create_paper(self, celery_data):
             object_id=paper.id,
             vote_type=GrmVote.UPVOTE,
         )
+
+        logger.info(f"creating openai comment")
+
+        source = "researchhub"
+        comment = "test comment with Open AI"
+        thread = Thread.objects.create(
+            paper=paper,
+            source=source,
+            text={"ops": [{"insert": comment}]},
+            plain_text=comment,
+            created_by=paper.uploaded_by
+        )
+        thread.save()
+
+        logger.info(f"finished creating openai comment")
+
         paper.unified_document.update_filter(FILTER_OPEN_ACCESS)
         download_pdf.apply_async((paper_id,), priority=3, countdown=5)
         add_orcid_authors.apply_async((paper_id,), priority=5, countdown=5)
