@@ -171,7 +171,8 @@ def download_pdf(paper_id, retry=0):
             # paper.reset_cache(use_celery=False)
             paper.set_paper_completeness()
             celery_extract_pdf_sections.apply_async(
-                (paper_id,), priority=5, countdown=15
+                (paper_id,), priority=5, countdown=1,
+                link=generate_openai_summary.s(paper_id=paper_id)
             )
             return True
         except Exception as e:
@@ -605,6 +606,41 @@ def celery_extract_pdf_sections(paper_id):
     finally:
         shutil.rmtree(path)
         return True, return_code
+
+
+@app.task(queue=QUEUE_PAPER_MISC)
+def generate_openai_summary(extract_pdf_section_result, paper_id):
+    extract_pdf_section_success, extract_pdf_section_return_code = extract_pdf_section_result
+
+    if not extract_pdf_section_success:
+        return None
+
+    Paper = apps.get_model("paper.Paper")
+    Thread = apps.get_model("discussion.Thread")
+
+    try:
+        paper = Paper.objects.get(pk=paper_id)
+
+        html_bytes = paper.pdf_file_extract.read()
+        # b64_string = base64.b64encode(html_bytes)
+
+        logger.info(f"first 200 characters of parsed paper: {html_bytes[0:200]}")
+
+        logger.info(f"creating openai comment")
+        source = "researchhub"
+        comment = "New comment with Open AI, after the pdf has been retrieved."
+        thread = Thread.objects.create(
+            paper=paper,
+            source=source,
+            text={"ops": [{"insert": comment}]},
+            plain_text=comment,
+            created_by=paper.uploaded_by
+        )
+        thread.save()
+        return thread.id
+    except Exception as e:
+        sentry.log_error(e)
+        return None
 
 
 @app.task(queue=QUEUE_PAPER_MISC)
