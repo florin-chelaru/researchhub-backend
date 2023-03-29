@@ -9,15 +9,20 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from subprocess import PIPE, run
+import openai
+from researchhub.settings import keys
 
 import feedparser
 import fitz
 import requests
 import twitter
+import xmltodict
+from PIL import Image
 from bs4 import BeautifulSoup
 from celery.decorators import periodic_task
 from celery.task.schedules import crontab
 from celery.utils.log import get_task_logger
+from discussion.models import Comment, Thread
 from django.apps import apps
 from django.core.cache import cache
 from django.core.files import File
@@ -25,11 +30,6 @@ from django.core.files.base import ContentFile
 from django.db import IntegrityError
 from django.utils.text import slugify
 from habanero import Crossref
-from PIL import Image
-from psycopg2.errors import UniqueViolation
-from pytz import timezone as pytz_tz
-
-from discussion.models import Comment, Thread
 from hub.utils import scopus_to_rh_map
 from paper.utils import (
     IGNORE_PAPER_TITLES,
@@ -48,7 +48,9 @@ from paper.utils import (
     merge_paper_votes,
     reset_paper_cache,
 )
+from psycopg2.errors import UniqueViolation
 from purchase.models import Wallet
+from pytz import timezone as pytz_tz
 from researchhub.celery import (
     QUEUE_CACHES,
     QUEUE_CERMINE,
@@ -59,7 +61,6 @@ from researchhub.celery import (
 )
 from researchhub.settings import APP_ENV, PRODUCTION
 from researchhub_document.utils import update_unified_document_to_paper
-from utils import sentry
 from utils.arxiv.categories import (
     ARXIV_CATEGORIES,
     get_category_name,
@@ -68,6 +69,8 @@ from utils.arxiv.categories import (
 from utils.crossref import get_crossref_issued_date
 from utils.http import check_url_contains_pdf
 from utils.twitter import get_twitter_results, get_twitter_url_results
+
+from utils import sentry
 
 logger = get_task_logger(__name__)
 
@@ -172,7 +175,7 @@ def download_pdf(paper_id, retry=0):
             paper.set_paper_completeness()
             celery_extract_pdf_sections.apply_async(
                 (paper_id,), priority=5, countdown=1,
-                link=generate_openai_summary.s(paper_id=paper_id)
+                link=celery_generate_openai_summary.s(paper_id=paper_id)
             )
             return True
         except Exception as e:
@@ -296,7 +299,7 @@ def celery_extract_figures(paper_id):
                 with open(extracted_figure_path, "rb") as f:
                     extracted_figures = Figure.objects.filter(paper=paper)
                     if not extracted_figures.filter(
-                        file__contains=f.name, figure_type=Figure.FIGURE
+                            file__contains=f.name, figure_type=Figure.FIGURE
                     ):
                         Figure.objects.create(
                             file=File(f), paper=paper, figure_type=Figure.FIGURE
@@ -343,7 +346,7 @@ def celery_extract_pdf_preview(paper_id, retry=0):
             output_filename = f"{paper_id}-{page.number}.png"
 
             if not extracted_figures.filter(
-                file__contains=output_filename, figure_type=Figure.PREVIEW
+                    file__contains=output_filename, figure_type=Figure.PREVIEW
             ):
                 img_buffer = BytesIO()
                 img_buffer.write(pix.pil_tobytes(format="PNG"))
@@ -586,7 +589,7 @@ def celery_extract_pdf_sections(paper_id):
                 split_file_name = f.name.split("/")
                 file_name = split_file_name[-1]
                 if not extracted_figures.filter(
-                    file__contains=file_name, figure_type=Figure.FIGURE
+                        file__contains=file_name, figure_type=Figure.FIGURE
                 ):
                     Figure.objects.create(
                         file=File(f, name=file_name),
@@ -608,8 +611,20 @@ def celery_extract_pdf_sections(paper_id):
         return True, return_code
 
 
+def extract_text_from_html_article(html_content):
+    try:
+        doc = xmltodict.parse(html_content)
+        logger.info(f"html doc: {doc}")
+        sections = doc["html"]["body"]["article"]["sec"]
+        return "\n".join(["\n".join([section['title']] + section['p']) for section in sections])
+
+    except Exception as e:
+        sentry.log_error(e)
+        return None
+
+
 @app.task(queue=QUEUE_PAPER_MISC)
-def generate_openai_summary(extract_pdf_section_result, paper_id):
+def celery_generate_openai_summary(extract_pdf_section_result, paper_id):
     extract_pdf_section_success, extract_pdf_section_return_code = extract_pdf_section_result
 
     if not extract_pdf_section_success:
@@ -621,14 +636,53 @@ def generate_openai_summary(extract_pdf_section_result, paper_id):
     try:
         paper = Paper.objects.get(pk=paper_id)
 
-        html_bytes = paper.pdf_file_extract.read()
-        # b64_string = base64.b64encode(html_bytes)
+        html_content = paper.pdf_file_extract.read()
+        text_content = extract_text_from_html_article(html_content)
 
-        logger.info(f"first 200 characters of parsed paper: {html_bytes[0:200]}")
+        if text_content is None:
+            logger.info(f"could not parse html paper")
+            return None
 
-        logger.info(f"creating openai comment")
+        logger.info(f"calling OpenAI...")
+
+        logger.info(f"openai key: {keys.OPENAI_KEY}")
+        openai.organization = "org-FLChJ7ALzBvKmppN634GeuYv"
+        openai.api_key = keys.OPENAI_KEY
+
+        comment = ""
+
+        while True:
+            try:
+                logger.info(f"making openai request")
+                response = openai.Completion.create(
+                    model="text-davinci-003",
+                    prompt=f"{text_content}\n\nTl;dr{comment}",
+                    temperature=0.7,
+                    max_tokens=60,
+                    top_p=1.0,
+                    frequency_penalty=0.0,
+                    presence_penalty=1
+                )
+                logger.info(f"openai response: {response}")
+                choice = response.get('choices')[0]
+                text = choice.get('text')
+                comment = comment + text
+                if choice.get('finish_reason') == 'stop':
+                    break
+                if text == "" or len(comment) > 4000:
+                    comment = comment + "..."
+                    break
+            except Exception as e:
+                sentry.log_error(e)
+                if len(comment) > 0:
+                    comment = comment + "..."
+
+        if comment == "":
+            logger.info(f"failed to extract openai summary")
+            return None
+
+        logger.info(f"openai summary: {comment}")
         source = "researchhub"
-        comment = "New comment with Open AI, after the pdf has been retrieved."
         thread = Thread.objects.create(
             paper=paper,
             source=source,
@@ -708,6 +762,7 @@ RETRY_MAX = 20  # It fails a lot so retry a bunch
 NUM_DUP_STOP = 30  # Number of dups to hit before determining we're done
 BASE_URL = "http://export.arxiv.org/api/query?"
 
+
 # Pull Daily (arxiv updates 20:00 EST)
 # @periodic_task(
 #     run_every=crontab(minute=0, hour='*/2'),
@@ -764,7 +819,7 @@ def pull_papers(start=0, force=False):
             # If failed to fetch and we're not at the end retry until the limit
             if url.getcode() != 200:
                 if num_retries < RETRY_MAX and i < int(
-                    feed.feed.opensearch_totalresults
+                        feed.feed.opensearch_totalresults
                 ):
                     num_retries += 1
                     time.sleep(RETRY_WAIT)
@@ -779,7 +834,7 @@ def pull_papers(start=0, force=False):
             # If no results and we're at the end or we've hit the retry limit give up
             if len(feed.entries) == 0:
                 if num_retries < RETRY_MAX and i < int(
-                    feed.feed.opensearch_totalresults
+                        feed.feed.opensearch_totalresults
                 ):
                     num_retries += 1
                     time.sleep(RETRY_WAIT)
@@ -868,7 +923,7 @@ def pull_papers(start=0, force=False):
 
                         # If not published in the past week we're done
                         if Paper.objects.get(
-                            pk=paper.id
+                                pk=paper.id
                         ).paper_publish_date < datetime.now().date() - timedelta(
                             days=7
                         ):
@@ -931,6 +986,7 @@ WAIT_TIME = 2
 RETRY_WAIT = 8
 RETRY_MAX = 20
 NUM_DUP_STOP = 30
+
 
 # Pull Daily
 # @periodic_task(
