@@ -13,6 +13,9 @@ ORCID_CLIENT_ID = os.environ.get("ORCID_CLIENT_ID")
 ORCID_CLIENT_SECRET = os.environ.get("ORCID_CLIENT_SECRET")
 ORCID_ACCESS_TOKEN = os.environ.get("ORCID_ACCESS_TOKEN")
 
+OPENAI_KEY = os.environ.get("OPENAI_KEY", "")
+OPENAI_ORG = os.environ.get("OPENAI_ORG", "")
+
 MAILCHIMP_KEY = os.environ.get("MAILCHIMP_KEY", "")
 MAILCHIMP_LIST_ID = os.environ.get("MAILCHIMP_LIST_ID", "")
 
