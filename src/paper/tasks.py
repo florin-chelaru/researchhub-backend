@@ -9,14 +9,11 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from subprocess import PIPE, run
-import openai
-from researchhub.settings import keys
 
 import feedparser
 import fitz
 import requests
 import twitter
-import xmltodict
 from PIL import Image
 from bs4 import BeautifulSoup
 from celery.decorators import periodic_task
@@ -611,186 +608,41 @@ def celery_extract_pdf_sections(paper_id):
         return True, return_code
 
 
-def extract_flattened_paragraphs_from_section(section):
-    title = section.get("title")
-    paragraphs = section.get("p")
-    subsections = section.get("sec")
-    if title is None and paragraphs is None and subsections is None:
-        return []
-
-    result = [title.strip()] if title is not None else []
-    if paragraphs is not None:
-        if type(paragraphs) is str:
-            result.append(paragraphs.strip())
-
-        else:
-            # paragraphs is list
-            for paragraph in paragraphs:
-                if type(paragraph) is str:
-                    result.append(paragraph.strip())
-                elif isinstance(paragraph, dict):
-                    text = paragraph.get('#text')
-                    if text is not None:
-                        result.append(text.strip())
-                else:
-                    logger.info(f"section {section.get('@id')} has paragraph that's not dict or str: {paragraph}")
-
-    if subsections is not None:
-        if type(subsections) is list:
-            for sec in subsections:
-                result.extend(extract_flattened_paragraphs_from_section(sec))
-        elif isinstance(subsections, dict):
-            result.extend(extract_flattened_paragraphs_from_section(subsections))
-        else:
-            logger.info(f"section {section.get('@id')} has subsection that's not dict or list")
-
-    return result
-
-
-def extract_paragraphs_from_html_article(html_content):
-    try:
-        doc = xmltodict.parse(html_content)
-        # logger.info(f"html doc: {doc}")
-        sections = doc["html"]["body"]["article"]["sec"]
-        if sections is None:
-            # print("document has no sections")
-            logger.info("document has no sections")
-            return None
-
-        paragraphs = []
-
-        if type(sections) is list:
-            # return "\n\n".join(extract_flattened_paragraphs_from_section(sec) for sec in sections)
-            for sec in sections:
-                paragraphs.extend(extract_flattened_paragraphs_from_section(sec))
-        elif isinstance(sections, dict):
-            paragraphs.extend(extract_flattened_paragraphs_from_section(sections))
-        else:
-            logger.info(f"document has section that's not dict or list")
-            return None
-
-        if len(paragraphs) == 0:
-            logger.info(f"no text was found in the document")
-            return None
-
-        return paragraphs
-
-    except Exception as e:
-        sentry.log_error(e)
-        return None
-
-
-def generate_openai_summary(chunk):
-    summary = ""
-    logger.info(f"chunk sent to openai: {chunk}")
-    while True:
-        try:
-            logger.info(f"making openai request")
-            response = openai.Completion.create(
-                model="text-davinci-003",
-                prompt=f"{chunk}\n\nTl;dr{summary}",
-                temperature=0.7,
-                max_tokens=60,
-                top_p=1.0,
-                frequency_penalty=0.0,
-                presence_penalty=1
-            )
-            logger.info(f"openai response: {response}")
-            choice = response.get('choices')[0]
-            text = choice.get('text')
-            summary = summary + text
-            if text == "" or text is None or choice.get('finish_reason') == 'stop' \
-                    or choice.get('finish_reason') is None:
-                break
-        except Exception as e:
-            sentry.log_error(e)
-            # If an error has occurred but we've already fetched some content, then we append "..." to our partial
-            # result and use it like that.
-            if len(summary) > 0:
-                summary = summary + "..."
-
-    return summary
-
-
 @app.task(queue=QUEUE_PAPER_MISC)
 def celery_generate_openai_summary(extract_pdf_section_result, paper_id):
     extract_pdf_section_success, extract_pdf_section_return_code = extract_pdf_section_result
 
     if not extract_pdf_section_success:
+        logger.info(f"PDF extraction was not successful, so we cannot generate the OpenAI summary for paper {paper_id}")
         return None
 
+    from paper.summarizer import PaperSummarizer
     Paper = apps.get_model("paper.Paper")
     Thread = apps.get_model("discussion.Thread")
 
     try:
         paper = Paper.objects.get(pk=paper_id)
 
-        html_content = paper.pdf_file_extract.read()
-        paragraphs = extract_paragraphs_from_html_article(html_content)
-        logger.info(f"article split into {len(paragraphs)} paragraphs")
+        summarizer = PaperSummarizer(paper)
 
-        if paragraphs is None:
-            logger.info(f"could not parse html paper")
-            return None
+        logger.info(f"Extracting summary for paper {paper.id}")
+        summary = summarizer.get_summary()
 
-        logger.info(f"calling OpenAI...")
-        openai.organization = keys.OPENAI_ORG
-        openai.api_key = keys.OPENAI_KEY
-
-        # The call allows no more than 2048 tokens per request+response text. Each token is on average 4 characters, so
-        # we'll try to split the requests into paragraphs that are no more than 6000 characters, or roughly 1500 tokens.
-        request_texts = []
-        current_text = ""
-        max_length = 6000
-        for p in paragraphs:
-            if len(current_text) + len(p) > max_length:
-                if len(current_text) > 0:
-                    request_texts.append(current_text)
-                current_text = p
-                while len(current_text) > max_length:
-                    request_texts.append(current_text[0:max_length])
-                    current_text = current_text[max_length:]
-                continue
-            current_text = f"{current_text}\n\n{p}"
-        if len(current_text) > 0:
-            request_texts.append(current_text)
-
-        logger.info(f"splitting openai requests into {len(request_texts)} requests of {max_length} or fewer characters")
-
-        summary_parts = []
-        for chunk in request_texts:
-            comment_part = generate_openai_summary(chunk)
-
-            if comment_part != "":
-                summary_parts.append(comment_part)
-                logger.info(f"summary for chunk: {comment_part}")
-
-        if len(summary_parts) == 0:
-            logger.info("failed to extract openai summary for the doc: " + " ".join(paragraphs))
-            return None
-
-        comment = ""
-        if len(summary_parts) > 1:
-            # if we have multiple summaries, we'll make one final call to openai, to create the summary of all
-            # summaries:
-            concatenated = "\n".join(summary_parts)
-            comment = generate_openai_summary(concatenated[0:max_length])
+        if summary is not None and summary != "":
+            logger.info(f"OpenAI summary for paper {paper.id} was extracted successfully.")
+            source = "researchhub"
+            thread = Thread.objects.create(
+                paper=paper,
+                source=source,
+                text={"ops": [{"insert": summary}]},
+                plain_text=summary,
+                created_by=paper.uploaded_by,
+                discussion_post_type="SUMMARY"
+            )
+            thread.save()
+            return thread.id
         else:
-            comment = summary_parts[0]
-
-        # remove non-alphanumeric characters from beginning of the comment
-        comment = re.sub(r"^\W+", "", comment)
-        logger.info(f"openai summary: {comment}")
-        source = "researchhub"
-        thread = Thread.objects.create(
-            paper=paper,
-            source=source,
-            text={"ops": [{"insert": comment}]},
-            plain_text=comment,
-            created_by=paper.uploaded_by
-        )
-        thread.save()
-        return thread.id
+            return None
     except Exception as e:
         sentry.log_error(e)
         return None
